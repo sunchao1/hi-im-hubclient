@@ -3,6 +3,7 @@ package hubclient
 import (
 	"context"
 	"log/slog"
+	"sort"
 	"sync"
 
 	"github.com/sunchao1/hi-im-hubclient/pkg/hubclient/conn"
@@ -244,5 +245,6 @@ func (c *Client) subCmdList() []uint32 {
 	for cmd := range c.subCmds {
 		out = append(out, cmd)
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i] < out[j] })
 	return out
 }

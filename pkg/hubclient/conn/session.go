@@ -214,8 +214,9 @@ func (s *Session) EnqueueSend(frame []byte, timeout time.Duration) error {
 	if !s.ReadyNow() {
 		return ErrNotReady
 	}
+	frameCopy := append([]byte(nil), frame...)
 	select {
-	case s.sendq <- outbound{frame: frame}:
+	case s.sendq <- outbound{frame: frameCopy}:
 		return nil
 	case <-time.After(timeout):
 		return ErrSendTimeout
@@ -261,7 +262,6 @@ func (s *Session) handshake(ctx context.Context, conn net.Conn) error {
 	}
 
 	s.setState(StateSubscribing)
-	subNeed := len(s.subCmds)
 	for _, cmd := range s.subCmds {
 		subFrame := wire.EncodeFrame(
 			wire.CmdSubReq,
@@ -272,14 +272,16 @@ func (s *Session) handshake(ctx context.Context, conn net.Conn) error {
 		if err := writeAll(conn, subFrame); err != nil {
 			return err
 		}
+		if err := s.waitSubAck(ctx, conn, snap, cmd, 10*time.Second); err != nil {
+			return err
+		}
 	}
-	if subNeed == 0 {
-		return nil
-	}
+	return nil
+}
 
-	subAcks := 0
-	deadline = time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && subAcks < subNeed {
+func (s *Session) waitSubAck(ctx context.Context, conn net.Conn, snap *wire.Snap, cmd uint32, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
@@ -291,14 +293,10 @@ func (s *Session) handshake(ctx context.Context, conn net.Conn) error {
 			continue
 		}
 		if frame.Header.Type == wire.CmdSubAck {
-			subAcks++
-			continue
+			return nil
 		}
 	}
-	if subAcks < subNeed {
-		return fmt.Errorf("sub ack timeout (%d/%d)", subAcks, subNeed)
-	}
-	return nil
+	return fmt.Errorf("sub ack timeout cmd=0x%X", cmd)
 }
 
 func (s *Session) recvLoop(ctx context.Context, conn net.Conn) error {
@@ -402,15 +400,31 @@ func (s *Session) handleFrame(frame *wire.Frame) error {
 	default:
 		payload := make([]byte, len(frame.Payload))
 		copy(payload, frame.Payload)
-		select {
-		case s.recvq <- inbound{
+		item := inbound{
 			cmd:     frame.Header.Type,
 			origNid: frame.Header.NID,
 			payload: payload,
-		}:
+		}
+		select {
+		case s.recvq <- item:
 			return nil
 		default:
-			s.log.Warn("recv queue full, dropping frame", "cmd", frame.Header.Type)
+		}
+		// Block rather than drop: apply TCP backpressure instead of silent loss.
+		start := time.Now()
+		select {
+		case s.recvq <- item:
+			if wait := time.Since(start); wait > 50*time.Millisecond {
+				s.log.Warn("recv queue backlog",
+					"cmd", fmt.Sprintf("0x%04X", frame.Header.Type),
+					"wait_ms", wait.Milliseconds(),
+					"payload_len", len(payload))
+			}
+			return nil
+		case <-time.After(5 * time.Second):
+			s.log.Error("recv queue full, dropping frame",
+				"cmd", fmt.Sprintf("0x%04X", frame.Header.Type),
+				"payload_len", len(payload))
 			return nil
 		}
 	}
