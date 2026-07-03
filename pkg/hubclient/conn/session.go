@@ -261,6 +261,7 @@ func (s *Session) handshake(ctx context.Context, conn net.Conn) error {
 	}
 
 	s.setState(StateSubscribing)
+	subNeed := len(s.subCmds)
 	for _, cmd := range s.subCmds {
 		subFrame := wire.EncodeFrame(
 			wire.CmdSubReq,
@@ -271,6 +272,31 @@ func (s *Session) handshake(ctx context.Context, conn net.Conn) error {
 		if err := writeAll(conn, subFrame); err != nil {
 			return err
 		}
+	}
+	if subNeed == 0 {
+		return nil
+	}
+
+	subAcks := 0
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) && subAcks < subNeed {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		frame, err := s.readOneFrame(conn, snap)
+		if err != nil {
+			return err
+		}
+		if frame == nil {
+			continue
+		}
+		if frame.Header.Type == wire.CmdSubAck {
+			subAcks++
+			continue
+		}
+	}
+	if subAcks < subNeed {
+		return fmt.Errorf("sub ack timeout (%d/%d)", subAcks, subNeed)
 	}
 	return nil
 }

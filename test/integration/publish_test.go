@@ -82,9 +82,11 @@ func TestPublishForwardToBackend(t *testing.T) {
 
 	time.Sleep(200 * time.Millisecond)
 
-	imFrame := make([]byte, 48)
+	const imHeaderSize = 52
+	const imNidOffset = 24
+	imFrame := make([]byte, imHeaderSize)
 	binary.BigEndian.PutUint32(imFrame[0:4], benchCmd)
-	binary.BigEndian.PutUint32(imFrame[4:8], backendNID)
+	binary.BigEndian.PutUint32(imFrame[imNidOffset:imNidOffset+4], backendNID)
 
 	if err := producer.AsyncSend(benchCmd, 0, imFrame); err != nil {
 		t.Fatalf("AsyncSend: %v", err)
